@@ -1,0 +1,57 @@
+package com.alhassan.screening;
+
+import com.alhassan.screening.Transaction;
+import com.alhassan.screening.ScreeningPolicy;
+import com.alhassan.screening.ScreeningResult;
+
+// Amounts are in the account's base currency.
+// Each request inserts a Transaction, an empty ScreeningResult and (optionally) a ScreeningPolicy.
+
+rule "Invalid amount"
+when
+    $t : Transaction( amount <= 0 )
+    $r : ScreeningResult( transactionId == $t.id )
+then
+    $r.flag(ScreeningResult.REJECT, 100, "Amount must be greater than zero");
+end
+
+rule "Daily limit exceeded"
+when
+    $t : Transaction( dailyTotal > 50000 )
+    $r : ScreeningResult( transactionId == $t.id )
+then
+    $r.flag(ScreeningResult.REJECT, 50, "Daily limit of 50,000 exceeded");
+end
+
+rule "High-risk country"
+when
+    $t : Transaction( $country : country )
+    ScreeningPolicy( highRiskCountries contains $country )
+    $r : ScreeningResult( transactionId == $t.id )
+then
+    $r.flag(ScreeningResult.REVIEW, 30, "Counterparty country " + $country + " is high risk");
+end
+
+rule "High-risk customer with large amount"
+when
+    $t : Transaction( customerRiskLevel == "HIGH", amount > 10000 )
+    $r : ScreeningResult( transactionId == $t.id )
+then
+    $r.flag(ScreeningResult.REVIEW, 25, "High-risk customer sending more than 10,000");
+end
+
+rule "New account with large amount"
+when
+    $t : Transaction( accountAgeDays < 30, amount > 5000 )
+    $r : ScreeningResult( transactionId == $t.id )
+then
+    $r.flag(ScreeningResult.REVIEW, 20, "Account younger than 30 days sending more than 5,000");
+end
+
+rule "Cash reporting threshold"
+when
+    $t : Transaction( channel == "CASH", amount >= 10000 )
+    $r : ScreeningResult( transactionId == $t.id )
+then
+    $r.flag(ScreeningResult.REVIEW, 15, "Cash transaction at or above the 10,000 reporting threshold");
+end
