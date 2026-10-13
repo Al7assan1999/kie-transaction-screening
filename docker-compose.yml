@@ -1,0 +1,30 @@
+# Business Central (rule authoring) + KIE Server (rule execution) + the .NET screening API.
+# KIE Server registers itself with Business Central, so projects deployed from the
+# Business Central UI are served by KIE Server and callable from the API.
+services:
+  business-central:
+    image: quay.io/kiegroup/business-central-workbench-showcase:7.74.1.Final
+    ports:
+      - "8080:8080"   # http://localhost:8080/business-central  (admin / admin)
+      - "8001:8001"   # git over SSH, for cloning projects out of Business Central
+
+  kie-server:
+    image: quay.io/kiegroup/kie-server-showcase:7.74.1.Final
+    depends_on: [business-central]
+    ports:
+      - "8180:8080"   # http://localhost:8180/kie-server/services/rest/server  (kieserver / kieserver1!)
+    environment:
+      KIE_SERVER_ID: kie-server
+      KIE_SERVER_LOCATION: http://kie-server:8080/kie-server/services/rest/server
+      KIE_SERVER_CONTROLLER: http://business-central:8080/business-central/rest/controller
+      KIE_MAVEN_REPO: http://business-central:8080/business-central/maven2
+
+  api:
+    build: .
+    depends_on: [kie-server]
+    ports:
+      - "5080:8080"   # http://localhost:5080/openapi/v1.json
+    environment:
+      KieServer__BaseUrl: http://kie-server:8080/kie-server/services/rest/server
+      # Business Central names containers <artifactId>_<version> when deploying.
+      KieServer__ContainerId: transaction-rules_1.0.0

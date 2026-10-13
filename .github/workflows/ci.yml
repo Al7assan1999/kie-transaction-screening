@@ -1,0 +1,109 @@
+name: CI
+
+on: [push, pull_request]
+
+env:
+  KIE_IMAGE: quay.io/kiegroup/kie-server-showcase:7.74.1.Final
+  KIE_URL: http://localhost:8180/kie-server/services/rest/server
+  KIE_AUTH: kieserver:kieserver1!
+
+jobs:
+  rules:
+    name: Drools rules (Maven)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 11
+          cache: maven
+      - run: mvn -B -f rules/pom.xml verify
+
+  api:
+    name: .NET API (unit tests)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - run: dotnet test --configuration Release
+      - run: docker build -t screening-api .
+
+  integration:
+    name: End-to-end on a real KIE Server
+    needs: [rules, api]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 11
+          cache: maven
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Start KIE Server
+        run: docker run -d --name kie -p 8180:8080 "$KIE_IMAGE"
+
+      - name: Build the KJAR
+        run: mvn -B -f rules/pom.xml install -DskipTests
+
+      - name: Wait for KIE Server
+        run: |
+          for i in $(seq 1 60); do
+            curl -sf -u "$KIE_AUTH" -H 'Accept: application/json' "$KIE_URL" && exit 0
+            sleep 5
+          done
+          echo "KIE Server did not start"; exit 1
+
+      - name: Deploy the KJAR to KIE Server
+        run: |
+          repo=/opt/jboss/.m2/repository/com/alhassan/transaction-rules/1.0.0
+          docker exec kie mkdir -p "$repo"
+          docker cp ~/.m2/repository/com/alhassan/transaction-rules/1.0.0/. "kie:$repo/"
+          curl -sf -u "$KIE_AUTH" -X PUT \
+            -H 'Content-Type: application/json' -H 'Accept: application/json' \
+            -d '{"container-id":"transaction-rules","release-id":{"group-id":"com.alhassan","artifact-id":"transaction-rules","version":"1.0.0"}}' \
+            "$KIE_URL/containers/transaction-rules" | tee deploy.json
+          grep -q '"type" : "SUCCESS"' deploy.json
+
+      - name: Run integration tests
+        env:
+          KIE_SERVER_URL: ${{ env.KIE_URL }}
+        run: dotnet test --configuration Release --filter "FullyQualifiedName~KieServerIntegrationTests" --logger "console;verbosity=normal"
+
+      - name: KIE Server logs
+        if: failure()
+        run: docker logs kie 2>&1 | tail -200
+
+  compose:
+    name: Business Central + KIE Server stack
+    needs: [api]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Start the stack
+        run: docker compose up -d --build
+      - name: KIE Server registers with Business Central
+        run: |
+          for i in $(seq 1 90); do
+            servers=$(curl -s -u admin:admin -H 'Accept: application/json' \
+              http://localhost:8080/business-central/rest/controller/management/servers || true)
+            if echo "$servers" | grep -q '"server-id" *: *"kie-server"'; then
+              echo "$servers"; exit 0
+            fi
+            sleep 5
+          done
+          echo "KIE Server never registered. Last response: $servers"; exit 1
+      - name: API reaches KIE Server
+        run: |
+          # No container is deployed yet, so the API should report 503 from /api/rules/status (not crash).
+          code=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:5080/api/rules/status)
+          echo "status endpoint returned $code"; test "$code" = "503"
+      - name: Logs
+        if: failure()
+        run: docker compose logs --tail 150
